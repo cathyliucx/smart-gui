@@ -1,12 +1,22 @@
 // ipcHandlers.ts
 
-import { ipcMain, shell, dialog } from "electron"
+import { ipcMain, shell, dialog, desktopCapturer } from "electron"
 import { randomBytes } from "crypto"
 import { IIpcHandlerDeps } from "./main"
 import { configHelper } from "./ConfigHelper"
+import { AudioHelper } from "./AudioHelper"
+import { KnowledgeBaseHelper } from "./KnowledgeBaseHelper"
+
+// Audio and Knowledge Base helpers — initialized lazily
+let audioHelper: AudioHelper | null = null
+let knowledgeBaseHelper: KnowledgeBaseHelper | null = null
 
 export function initializeIpcHandlers(deps: IIpcHandlerDeps): void {
   console.log("Initializing IPC handlers")
+
+  // Initialize knowledge base and audio helpers
+  knowledgeBaseHelper = new KnowledgeBaseHelper()
+  audioHelper = new AudioHelper(deps.getMainWindow, knowledgeBaseHelper)
 
   // Configuration handlers
   ipcMain.handle("get-config", () => {
@@ -337,30 +347,126 @@ export function initializeIpcHandlers(deps: IIpcHandlerDeps): void {
   // Delete last screenshot handler
   ipcMain.handle("delete-last-screenshot", async () => {
     try {
-      const queue = deps.getView() === "queue" 
-        ? deps.getScreenshotQueue() 
+      const queue = deps.getView() === "queue"
+        ? deps.getScreenshotQueue()
         : deps.getExtraScreenshotQueue()
-      
+
       if (queue.length === 0) {
         return { success: false, error: "No screenshots to delete" }
       }
-      
+
       // Get the last screenshot in the queue
       const lastScreenshot = queue[queue.length - 1]
-      
+
       // Delete it
       const result = await deps.deleteScreenshot(lastScreenshot)
-      
+
       // Notify the renderer about the change
       const mainWindow = deps.getMainWindow()
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("screenshot-deleted", { path: lastScreenshot })
       }
-      
+
       return result
     } catch (error) {
       console.error("Error deleting last screenshot:", error)
       return { success: false, error: "Failed to delete last screenshot" }
     }
+  })
+
+  // ──────── Audio Monitoring Handlers ────────
+
+  // Provide desktop capturer sources for system audio capture
+  ipcMain.handle("get-desktop-sources", async () => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ["screen"],
+        thumbnailSize: { width: 0, height: 0 }
+      })
+      return sources.map(s => ({ id: s.id, name: s.name }))
+    } catch (error) {
+      console.error("Error getting desktop sources:", error)
+      return []
+    }
+  })
+
+  // Receive audio chunk from renderer for transcription
+  ipcMain.handle("send-audio-chunk", async (_event, audioData: Buffer) => {
+    if (!audioHelper) {
+      return { success: false, error: "Audio helper not initialized" }
+    }
+    try {
+      await audioHelper.processAudioChunk(audioData)
+      return { success: true }
+    } catch (error: any) {
+      console.error("Error processing audio chunk:", error)
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Generate AI answer from accumulated transcriptions
+  ipcMain.handle("generate-audio-answer", async (_event, customQuestion?: string) => {
+    if (!audioHelper) {
+      return { success: false, error: "Audio helper not initialized" }
+    }
+    try {
+      await audioHelper.generateAnswer(customQuestion)
+      return { success: true }
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Cancel ongoing answer generation
+  ipcMain.handle("cancel-audio-generation", () => {
+    audioHelper?.cancelGeneration()
+    return { success: true }
+  })
+
+  // Clear transcription history
+  ipcMain.handle("clear-audio-history", () => {
+    audioHelper?.clearHistory()
+    return { success: true }
+  })
+
+  // Get accumulated transcription text
+  ipcMain.handle("get-audio-transcription-text", () => {
+    return audioHelper?.getTranscriptionText() || ""
+  })
+
+  // ──────── Knowledge Base Handlers ────────
+
+  // Open folder dialog and select KB path
+  ipcMain.handle("select-kb-folder", async () => {
+    if (!knowledgeBaseHelper) {
+      return { success: false, error: "Knowledge base helper not initialized" }
+    }
+    try {
+      const selectedPath = await knowledgeBaseHelper.selectFolder()
+      if (selectedPath) {
+        // Save to config
+        configHelper.updateConfig({ knowledgeBasePath: selectedPath } as any)
+        return { success: true, path: selectedPath }
+      }
+      return { success: false, error: "No folder selected" }
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  // Reload knowledge base documents
+  ipcMain.handle("reload-kb", () => {
+    knowledgeBaseHelper?.reload()
+    return { success: true, documents: knowledgeBaseHelper?.getDocumentList() || [] }
+  })
+
+  // Get list of loaded KB documents
+  ipcMain.handle("get-kb-documents", () => {
+    return knowledgeBaseHelper?.getDocumentList() || []
+  })
+
+  // Get current KB path
+  ipcMain.handle("get-kb-path", () => {
+    return knowledgeBaseHelper?.getPath() || ""
   })
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -40,6 +40,9 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
   const [geminiBaseUrl, setGeminiBaseUrl] = useState(DEFAULT_BASE_URLS.gemini);
   const [anthropicBaseUrl, setAnthropicBaseUrl] = useState(DEFAULT_BASE_URLS.anthropic);
   const [isLoading, setIsLoading] = useState(false);
+  const [kbPath, setKbPath] = useState("");
+  const [kbDocCount, setKbDocCount] = useState(0);
+  const [audioChunkInterval, setAudioChunkInterval] = useState(10);
   const { showToast } = useToast();
   const providerDisplayName: Record<APIProvider, string> = {
     openai: "OpenAI",
@@ -91,6 +94,10 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
           setOpenaiBaseUrl(config.openaiBaseUrl || DEFAULT_BASE_URLS.openai);
           setGeminiBaseUrl(config.geminiBaseUrl || DEFAULT_BASE_URLS.gemini);
           setAnthropicBaseUrl(config.anthropicBaseUrl || DEFAULT_BASE_URLS.anthropic);
+          setAudioChunkInterval((config as any).audioChunkInterval || 10);
+          // Load KB info
+          window.electronAPI.getKnowledgeBasePath().then((p: string) => setKbPath(p || ""));
+          window.electronAPI.getKnowledgeBaseDocuments().then((docs: any[]) => setKbDocCount(docs.length));
         })
         .catch((error: unknown) => {
           console.error("Failed to load config:", error);
@@ -141,6 +148,7 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
         openaiBaseUrl,
         geminiBaseUrl,
         anthropicBaseUrl,
+        audioChunkInterval,
       });
       
       if (result) {
@@ -374,6 +382,59 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
                 
                 <div className="text-white/70">Zoom In</div>
                 <div className="text-white/90 font-mono">Ctrl+= / Cmd+=</div>
+
+                <div className="text-white/70">音频监听模式</div>
+                <div className="text-white/90 font-mono">Ctrl+M / Cmd+M</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Audio & Knowledge Base Settings */}
+          <div className="space-y-2 mt-4">
+            <label className="text-sm font-medium text-white mb-2 block">音频监听 & 知识库</label>
+            <div className="bg-black/30 border border-white/10 rounded-lg p-3 space-y-3">
+              <div>
+                <label className="text-xs text-white/60 block mb-1">知识库文件夹</label>
+                <div className="flex gap-2">
+                  <div className="flex-1 bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs text-white/70 truncate">
+                    {kbPath || "未设置"}
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="border-white/10 hover:bg-white/5 text-white text-xs px-3 py-1.5 h-auto"
+                    onClick={async () => {
+                      const result = await window.electronAPI.selectKnowledgeBaseFolder();
+                      if (result.success && result.path) {
+                        setKbPath(result.path);
+                        const docs = await window.electronAPI.getKnowledgeBaseDocuments();
+                        setKbDocCount(docs.length);
+                        showToast("Success", `已加载 ${docs.length} 个知识库文档`, "success");
+                      }
+                    }}
+                  >
+                    选择文件夹
+                  </Button>
+                </div>
+                {kbDocCount > 0 && (
+                  <p className="text-[10px] text-white/40 mt-1">已加载 {kbDocCount} 个文档（.txt, .md 等）</p>
+                )}
+                <p className="text-[10px] text-white/40 mt-1">
+                  选择包含你笔记/文档的文件夹，AI 回答面试问题时会参考其中内容
+                </p>
+              </div>
+              <div>
+                <label className="text-xs text-white/60 block mb-1">音频转录间隔（秒）</label>
+                <Input
+                  type="number"
+                  min={5}
+                  max={60}
+                  value={audioChunkInterval}
+                  onChange={(e) => setAudioChunkInterval(Math.max(5, Math.min(60, parseInt(e.target.value) || 10)))}
+                  className="bg-black/40 border-white/10 text-white w-24"
+                />
+                <p className="text-[10px] text-white/40 mt-1">
+                  每隔多少秒将音频片段发送给 AI 进行转录（建议 8-15 秒）
+                </p>
               </div>
             </div>
           </div>

@@ -248,7 +248,51 @@ const electronAPI = {
       ipcRenderer.removeListener("delete-last-screenshot", subscription)
     }
   },
-  deleteLastScreenshot: () => ipcRenderer.invoke("delete-last-screenshot")
+  deleteLastScreenshot: () => ipcRenderer.invoke("delete-last-screenshot"),
+
+  // Audio monitoring APIs
+  getDesktopSources: () => ipcRenderer.invoke("get-desktop-sources"),
+  sendAudioChunk: (audioData: ArrayBuffer) =>
+    ipcRenderer.invoke("send-audio-chunk", Buffer.from(audioData)),
+  generateAudioAnswer: (customQuestion?: string) =>
+    ipcRenderer.invoke("generate-audio-answer", customQuestion),
+  cancelAudioGeneration: () => ipcRenderer.invoke("cancel-audio-generation"),
+  clearAudioHistory: () => ipcRenderer.invoke("clear-audio-history"),
+  getAudioTranscriptionText: () => ipcRenderer.invoke("get-audio-transcription-text"),
+  onAudioTranscriptionUpdate: (callback: (data: { text: string; timestamp: number }) => void) => {
+    const subscription = (_: any, data: { text: string; timestamp: number }) => callback(data)
+    ipcRenderer.on("audio-transcription-update", subscription)
+    return () => {
+      ipcRenderer.removeListener("audio-transcription-update", subscription)
+    }
+  },
+  onAudioAnswerUpdate: (callback: (data: { question: string; answer: string; timestamp: number }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("audio-answer-update", subscription)
+    return () => {
+      ipcRenderer.removeListener("audio-answer-update", subscription)
+    }
+  },
+  onAudioError: (callback: (data: { message: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("audio-error", subscription)
+    return () => {
+      ipcRenderer.removeListener("audio-error", subscription)
+    }
+  },
+  onAudioStatus: (callback: (data: { message: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("audio-status", subscription)
+    return () => {
+      ipcRenderer.removeListener("audio-status", subscription)
+    }
+  },
+
+  // Knowledge base APIs
+  selectKnowledgeBaseFolder: () => ipcRenderer.invoke("select-kb-folder"),
+  reloadKnowledgeBase: () => ipcRenderer.invoke("reload-kb"),
+  getKnowledgeBaseDocuments: () => ipcRenderer.invoke("get-kb-documents"),
+  getKnowledgeBasePath: () => ipcRenderer.invoke("get-kb-path")
 }
 
 // Before exposing the API

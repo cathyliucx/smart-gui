@@ -31,7 +31,7 @@ const state = {
   processingHelper: null as ProcessingHelper | null,
 
   // View and state management
-  view: "queue" as "queue" | "solutions" | "debug",
+  view: "queue" as "queue" | "solutions" | "debug" | "audio",
   problemInfo: null as any,
   hasDebugged: false,
 
@@ -55,8 +55,8 @@ const state = {
 export interface IProcessingHelperDeps {
   getScreenshotHelper: () => ScreenshotHelper | null
   getMainWindow: () => BrowserWindow | null
-  getView: () => "queue" | "solutions" | "debug"
-  setView: (view: "queue" | "solutions" | "debug") => void
+  getView: () => "queue" | "solutions" | "debug" | "audio"
+  setView: (view: "queue" | "solutions" | "debug" | "audio") => void
   getProblemInfo: () => any
   setProblemInfo: (info: any) => void
   getScreenshotQueue: () => string[]
@@ -78,7 +78,7 @@ export interface IShortcutsHelperDeps {
   getImagePreview: (filepath: string) => Promise<string>
   processingHelper: ProcessingHelper | null
   clearQueues: () => void
-  setView: (view: "queue" | "solutions" | "debug") => void
+  setView: (view: "queue" | "solutions" | "debug" | "audio") => void
   isVisible: () => boolean
   toggleMainWindow: () => void
   moveWindowLeft: () => void
@@ -99,10 +99,10 @@ export interface IIpcHandlerDeps {
   processingHelper: ProcessingHelper | null
   PROCESSING_EVENTS: typeof state.PROCESSING_EVENTS
   takeScreenshot: () => Promise<string>
-  getView: () => "queue" | "solutions" | "debug"
+  getView: () => "queue" | "solutions" | "debug" | "audio"
   toggleMainWindow: () => void
   clearQueues: () => void
-  setView: (view: "queue" | "solutions" | "debug") => void
+  setView: (view: "queue" | "solutions" | "debug" | "audio") => void
   moveWindowLeft: () => void
   moveWindowRight: () => void
   moveWindowUp: () => void
@@ -617,11 +617,11 @@ function getMainWindow(): BrowserWindow | null {
   return state.mainWindow
 }
 
-function getView(): "queue" | "solutions" | "debug" {
+function getView(): "queue" | "solutions" | "debug" | "audio" {
   return state.view
 }
 
-function setView(view: "queue" | "solutions" | "debug"): void {
+function setView(view: "queue" | "solutions" | "debug" | "audio"): void {
   state.view = view
   state.screenshotHelper?.setView(view)
 }

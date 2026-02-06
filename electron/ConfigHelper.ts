@@ -16,6 +16,9 @@ interface Config {
   anthropicBaseUrl: string;
   language: string;
   opacity: number;
+  // Audio monitoring settings
+  knowledgeBasePath: string;
+  audioChunkInterval: number; // seconds between audio chunks for transcription
   // Legacy fields retained for backward compatibility with existing config files
   extractionModel?: string;
   solutionModel?: string;
@@ -75,7 +78,9 @@ export class ConfigHelper extends EventEmitter {
     geminiBaseUrl: DEFAULT_BASE_URLS.gemini,
     anthropicBaseUrl: DEFAULT_BASE_URLS.anthropic,
     language: "python",
-    opacity: 1.0
+    opacity: 1.0,
+    knowledgeBasePath: "",
+    audioChunkInterval: 10
   };
 
   constructor() {

@@ -149,6 +149,18 @@ export class ShortcutsHelper {
       }
     })
     
+    // Toggle audio monitoring view
+    globalShortcut.register("CommandOrControl+M", () => {
+      console.log("Command/Ctrl + M pressed. Toggling audio monitor view.")
+      const mainWindow = this.deps.getMainWindow()
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        // Send a special status message to trigger view switch in renderer
+        mainWindow.webContents.send("audio-status", {
+          message: "__SWITCH_TO_AUDIO_VIEW__"
+        })
+      }
+    })
+
     // Delete last screenshot shortcut
     globalShortcut.register("CommandOrControl+L", () => {
       console.log("Command/Ctrl + L pressed. Deleting last screenshot.")

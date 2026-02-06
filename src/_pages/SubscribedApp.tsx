@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useEffect, useRef, useState, type FC } from "react"
 import Queue from "../_pages/Queue"
 import Solutions from "../_pages/Solutions"
+import AudioMonitor from "../_pages/AudioMonitor"
 import { useToast } from "../contexts/toast"
 import type { ProblemStatementData } from "../types/solutions"
 
@@ -18,7 +19,7 @@ const SubscribedApp: FC<SubscribedAppProps> = ({
   setLanguage
 }) => {
   const queryClient = useQueryClient()
-  const [view, setView] = useState<"queue" | "solutions" | "debug">("queue")
+  const [view, setView] = useState<"queue" | "solutions" | "debug" | "audio">("queue")
   const containerRef = useRef<HTMLDivElement>(null)
   const { showToast } = useToast()
 
@@ -87,6 +88,20 @@ const SubscribedApp: FC<SubscribedAppProps> = ({
     }
   }, [view])
 
+  // Listen for audio view switch from keyboard shortcut
+  useEffect(() => {
+    const handleAudioSwitch = (_: any) => {
+      setView((prev) => (prev === "audio" ? "queue" : "audio"))
+    }
+    // @ts-ignore - custom event from preload
+    const sub = window.electronAPI.onAudioStatus?.((data: any) => {
+      if (data.message === "__SWITCH_TO_AUDIO_VIEW__") {
+        setView((prev) => (prev === "audio" ? "queue" : "audio"))
+      }
+    })
+    return () => sub?.()
+  }, [])
+
   // Listen for events that might switch views or show errors
   useEffect(() => {
     const cleanupFunctions = [
@@ -148,6 +163,12 @@ const SubscribedApp: FC<SubscribedAppProps> = ({
         <Solutions
           setView={setView}
           credits={credits}
+          currentLanguage={currentLanguage}
+          setLanguage={setLanguage}
+        />
+      ) : view === "audio" ? (
+        <AudioMonitor
+          setView={setView}
           currentLanguage={currentLanguage}
           setLanguage={setLanguage}
         />

@@ -65,6 +65,8 @@ export interface ElectronAPI {
     anthropicBaseUrl: string;
     language: string;
     opacity: number;
+    knowledgeBasePath: string;
+    audioChunkInterval: number;
   }>
   updateConfig: (config: {
     apiKey?: string;
@@ -77,6 +79,8 @@ export interface ElectronAPI {
     anthropicBaseUrl?: string;
     language?: string;
     opacity?: number;
+    knowledgeBasePath?: string;
+    audioChunkInterval?: number;
   }) => Promise<boolean>
   setClickThrough: (ignore: boolean) => Promise<{ success: boolean; error?: string }>
   checkApiKey: () => Promise<boolean>
@@ -84,6 +88,24 @@ export interface ElectronAPI {
   openLink: (url: string) => void
   onApiKeyInvalid: (callback: () => void) => () => void
   removeListener: (eventName: string, callback: (...args: any[]) => void) => void
+
+  // Audio monitoring APIs
+  getDesktopSources: () => Promise<Array<{ id: string; name: string }>>
+  sendAudioChunk: (audioData: ArrayBuffer) => Promise<{ success: boolean; error?: string }>
+  generateAudioAnswer: (customQuestion?: string) => Promise<{ success: boolean; error?: string }>
+  cancelAudioGeneration: () => Promise<{ success: boolean }>
+  clearAudioHistory: () => Promise<{ success: boolean }>
+  getAudioTranscriptionText: () => Promise<string>
+  onAudioTranscriptionUpdate: (callback: (data: { text: string; timestamp: number }) => void) => () => void
+  onAudioAnswerUpdate: (callback: (data: { question: string; answer: string; timestamp: number }) => void) => () => void
+  onAudioError: (callback: (data: { message: string }) => void) => () => void
+  onAudioStatus: (callback: (data: { message: string }) => void) => () => void
+
+  // Knowledge base APIs
+  selectKnowledgeBaseFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
+  reloadKnowledgeBase: () => Promise<{ success: boolean; documents?: Array<{ filename: string; size: number }> }>
+  getKnowledgeBaseDocuments: () => Promise<Array<{ filename: string; size: number }>>
+  getKnowledgeBasePath: () => Promise<string>
 }
 
 declare global {
