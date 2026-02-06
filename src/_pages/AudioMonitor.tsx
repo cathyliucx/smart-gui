@@ -31,12 +31,13 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
   const [isGenerating, setIsGenerating] = useState(false)
   const [kbPath, setKbPath] = useState("")
   const [kbDocCount, setKbDocCount] = useState(0)
+  const [pendingChunks, setPendingChunks] = useState(0)
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const chunkIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const transcriptionEndRef = useRef<HTMLDivElement>(null)
   const answerEndRef = useRef<HTMLDivElement>(null)
+  const pendingRef = useRef(0)
 
   // Load KB info on mount
   useEffect(() => {
@@ -59,6 +60,9 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
       window.electronAPI.onAudioTranscriptionUpdate((data) => {
         setTranscriptions((prev) => [...prev, data])
         setErrorMessage("")
+        // Decrement pending counter
+        pendingRef.current = Math.max(0, pendingRef.current - 1)
+        setPendingChunks(pendingRef.current)
       }),
       window.electronAPI.onAudioAnswerUpdate((data) => {
         setAnswers((prev) => [...prev, data])
@@ -67,6 +71,8 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
       window.electronAPI.onAudioError((data) => {
         setErrorMessage(data.message)
         setIsGenerating(false)
+        pendingRef.current = Math.max(0, pendingRef.current - 1)
+        setPendingChunks(pendingRef.current)
       }),
       window.electronAPI.onAudioStatus((data) => {
         setStatusMessage(data.message)
@@ -87,7 +93,14 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
   }, [answers])
 
   /**
-   * Start capturing system audio via Electron desktopCapturer
+   * Start capturing system audio using timeslice for real-time streaming.
+   *
+   * Key difference from batch mode:
+   * - MediaRecorder.start(timesliceMs) fires ondataavailable every timesliceMs
+   *   WITHOUT stopping the recording. This gives a continuous stream of small
+   *   audio blobs that are immediately sent for transcription.
+   * - Multiple transcription requests run concurrently (up to MAX_CONCURRENT
+   *   in AudioHelper) so we don't wait for one to finish before sending the next.
    */
   const startRecording = useCallback(async () => {
     try {
@@ -126,74 +139,45 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
       const audioStream = new MediaStream(stream.getAudioTracks())
       streamRef.current = audioStream
 
-      // Create MediaRecorder
+      // Create MediaRecorder with timeslice-based streaming
       const recorder = new MediaRecorder(audioStream, {
         mimeType: "audio/webm;codecs=opus",
       })
       mediaRecorderRef.current = recorder
 
-      let audioChunks: Blob[] = []
+      // Each ondataavailable fires a small blob that gets sent immediately
+      recorder.ondataavailable = async (event) => {
+        if (event.data.size > 500) {
+          // Increment pending counter
+          pendingRef.current++
+          setPendingChunks(pendingRef.current)
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunks.push(event.data)
+          try {
+            const arrayBuffer = await event.data.arrayBuffer()
+            // Fire-and-forget: AudioHelper handles concurrency
+            window.electronAPI.sendAudioChunk(arrayBuffer)
+          } catch (err) {
+            console.error("Error sending audio chunk:", err)
+            pendingRef.current = Math.max(0, pendingRef.current - 1)
+            setPendingChunks(pendingRef.current)
+          }
         }
       }
 
-      recorder.onstop = () => {
-        // This fires when we stop to send a chunk
-      }
-
-      recorder.start()
-      setIsRecording(true)
-      setStatusMessage("正在监听系统音频...")
-
-      // Get config for chunk interval
+      // Get chunk interval from config (default 3s for real-time feel)
       const config = await window.electronAPI.getConfig()
-      const intervalMs = (config.audioChunkInterval || 10) * 1000
+      const timesliceMs = Math.max(2000, (config.audioChunkInterval || 3) * 1000)
 
-      // Periodically stop/restart to send chunks
-      chunkIntervalRef.current = setInterval(async () => {
-        if (
-          mediaRecorderRef.current &&
-          mediaRecorderRef.current.state === "recording"
-        ) {
-          // Stop to collect data
-          mediaRecorderRef.current.stop()
+      // Start recording with timeslice — ondataavailable fires every timesliceMs
+      // automatically, no need to stop/restart the recorder
+      recorder.start(timesliceMs)
 
-          // Wait for data to be collected
-          await new Promise((resolve) => setTimeout(resolve, 100))
-
-          if (audioChunks.length > 0) {
-            const blob = new Blob(audioChunks, { type: "audio/webm" })
-            audioChunks = []
-
-            // Only send if blob is large enough (likely has audio content)
-            if (blob.size > 1000) {
-              const arrayBuffer = await blob.arrayBuffer()
-              window.electronAPI.sendAudioChunk(arrayBuffer)
-            }
-          }
-
-          // Restart recording
-          if (streamRef.current && streamRef.current.active) {
-            const newRecorder = new MediaRecorder(streamRef.current, {
-              mimeType: "audio/webm;codecs=opus",
-            })
-            newRecorder.ondataavailable = (event) => {
-              if (event.data.size > 0) {
-                audioChunks.push(event.data)
-              }
-            }
-            mediaRecorderRef.current = newRecorder
-            newRecorder.start()
-          }
-        }
-      }, intervalMs)
+      setIsRecording(true)
+      setStatusMessage(`实时监听中（每 ${timesliceMs / 1000}s 一片段）...`)
     } catch (error: any) {
       console.error("Error starting audio capture:", error)
       setErrorMessage(
-        `启动音频捕获失败: ${error.message}. 请确保已授予屏幕录制权限。`
+        `启动音频捕获失败: ${error.message}。请确保已授予屏幕录制权限。`
       )
       setIsRecording(false)
     }
@@ -203,11 +187,6 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
    * Stop recording
    */
   const stopRecording = useCallback(() => {
-    if (chunkIntervalRef.current) {
-      clearInterval(chunkIntervalRef.current)
-      chunkIntervalRef.current = null
-    }
-
     if (
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state !== "inactive"
@@ -232,29 +211,22 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
     }
   }, [stopRecording])
 
-  /**
-   * Trigger AI answer generation from accumulated transcriptions
-   */
   const handleGenerateAnswer = useCallback(async () => {
     setIsGenerating(true)
     setErrorMessage("")
     await window.electronAPI.generateAudioAnswer()
   }, [])
 
-  /**
-   * Clear all transcriptions and answers
-   */
   const handleClear = useCallback(async () => {
     setTranscriptions([])
     setAnswers([])
     setErrorMessage("")
     setStatusMessage("")
+    pendingRef.current = 0
+    setPendingChunks(0)
     await window.electronAPI.clearAudioHistory()
   }, [])
 
-  /**
-   * Select knowledge base folder
-   */
   const handleSelectKBFolder = useCallback(async () => {
     const result = await window.electronAPI.selectKnowledgeBaseFolder()
     if (result.success && result.path) {
@@ -264,9 +236,6 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
     }
   }, [])
 
-  /**
-   * Reload knowledge base
-   */
   const handleReloadKB = useCallback(async () => {
     const result = await window.electronAPI.reloadKnowledgeBase()
     if (result.documents) {
@@ -288,10 +257,9 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold tracking-wide text-white/90">
-          音频监听助手
+          实时音频监听
         </h2>
         <div className="flex items-center gap-2">
-          {/* Knowledge base indicator */}
           <button
             onClick={handleSelectKBFolder}
             className="flex items-center gap-1 px-2 py-1 text-[10px] rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
@@ -309,7 +277,6 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
               <RefreshCw className="w-3 h-3" />
             </button>
           )}
-          {/* Back button */}
           <button
             onClick={() => setView("queue")}
             className="px-2 py-1 text-[10px] rounded bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-colors"
@@ -366,7 +333,9 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
         {isRecording && (
           <div className="flex items-center gap-1.5 ml-auto">
             <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-            <span className="text-[10px] text-white/50">录音中</span>
+            <span className="text-[10px] text-white/50">
+              实时录音{pendingChunks > 0 ? ` · 转录中(${pendingChunks})` : ""}
+            </span>
           </div>
         )}
       </div>
@@ -408,6 +377,12 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
                   </span>
                 </div>
               ))
+            )}
+            {isRecording && pendingChunks > 0 && (
+              <div className="flex items-center gap-1.5 mt-1">
+                <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                <span className="text-[10px] text-blue-400/60">转录中...</span>
+              </div>
             )}
             <div ref={transcriptionEndRef} />
           </div>
@@ -455,7 +430,7 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
 
       {/* Shortcuts hint */}
       <div className="mt-2 flex items-center justify-between text-[9px] text-white/20">
-        <span>Ctrl+M 开始/停止监听 | Ctrl+Enter 生成答案 | Ctrl+R 重置</span>
+        <span>Ctrl+M 切换模式 | Ctrl+Enter 生成答案 | Ctrl+R 重置</span>
         <span>
           {kbPath
             ? `知识库: ${kbPath.split(/[\\/]/).pop()}`

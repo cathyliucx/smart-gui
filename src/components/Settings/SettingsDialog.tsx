@@ -42,7 +42,7 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
   const [isLoading, setIsLoading] = useState(false);
   const [kbPath, setKbPath] = useState("");
   const [kbDocCount, setKbDocCount] = useState(0);
-  const [audioChunkInterval, setAudioChunkInterval] = useState(10);
+  const [audioChunkInterval, setAudioChunkInterval] = useState(3);
   const { showToast } = useToast();
   const providerDisplayName: Record<APIProvider, string> = {
     openai: "OpenAI",
@@ -433,7 +433,7 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
                   className="bg-black/40 border-white/10 text-white w-24"
                 />
                 <p className="text-[10px] text-white/40 mt-1">
-                  每隔多少秒将音频片段发送给 AI 进行转录（建议 8-15 秒）
+                  每隔多少秒将音频分片发送转录（实时建议 2-5 秒，省 API 额度建议 8-15 秒）
                 </p>
               </div>
             </div>

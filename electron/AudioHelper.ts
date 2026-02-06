@@ -1,8 +1,9 @@
 // AudioHelper.ts
-// Handles audio transcription via AI providers and answer generation
+// Handles audio transcription via AI providers and answer generation.
+// Supports concurrent chunk processing for real-time transcription.
 import fs from "node:fs"
 import path from "node:path"
-import { BrowserWindow } from "electron"
+import { app, BrowserWindow } from "electron"
 import { OpenAI } from "openai"
 import * as axios from "axios"
 import Anthropic from "@anthropic-ai/sdk"
@@ -12,6 +13,7 @@ import { KnowledgeBaseHelper } from "./KnowledgeBaseHelper"
 export interface AudioTranscriptionResult {
   text: string
   timestamp: number
+  chunkId: number
 }
 
 export interface AudioAnswerResult {
@@ -28,11 +30,16 @@ export const AUDIO_EVENTS = {
 } as const
 
 export class AudioHelper {
-  private mainWindow: (() => BrowserWindow | null)
+  private mainWindow: () => BrowserWindow | null
   private knowledgeBase: KnowledgeBaseHelper
   private transcriptionHistory: AudioTranscriptionResult[] = []
   private currentAbortController: AbortController | null = null
   private isProcessing = false
+
+  // Concurrent pipeline state
+  private chunkCounter = 0
+  private activeTranscriptions = 0
+  private readonly MAX_CONCURRENT = 3 // max parallel transcription requests
 
   constructor(
     getMainWindow: () => BrowserWindow | null,
@@ -40,16 +47,10 @@ export class AudioHelper {
   ) {
     this.mainWindow = getMainWindow
     this.knowledgeBase = knowledgeBase
-
-    // Re-initialize when config changes
-    configHelper.on("config-updated", () => {
-      // Nothing to re-init — clients are created on demand
-    })
   }
 
   /**
    * Transcribe an audio buffer using the configured AI provider.
-   * Accepts WebM/Opus audio data as a Buffer.
    */
   public async transcribeAudio(audioBuffer: Buffer): Promise<string> {
     const config = configHelper.loadConfig()
@@ -60,8 +61,7 @@ export class AudioHelper {
     } else if (provider === "gemini") {
       return this.transcribeWithGemini(audioBuffer, config)
     } else if (provider === "anthropic") {
-      // Anthropic doesn't support audio; use OpenAI Whisper as fallback
-      // or try Gemini-style if user has a compatible endpoint
+      // Anthropic has no native audio — fall back to Gemini-style endpoint
       return this.transcribeWithGemini(audioBuffer, config)
     }
 
@@ -78,13 +78,12 @@ export class AudioHelper {
     const client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.openaiBaseUrl,
-      timeout: 30000,
+      timeout: 15000, // tighter timeout for real-time
     })
 
-    // Write buffer to a temp file (Whisper API requires a file)
     const tmpPath = path.join(
-      require("electron").app.getPath("temp"),
-      `audio-${Date.now()}.webm`
+      app.getPath("temp"),
+      `audio-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.webm`
     )
     fs.writeFileSync(tmpPath, audioBuffer)
 
@@ -98,10 +97,7 @@ export class AudioHelper {
 
       return (transcription as any).toString().trim()
     } finally {
-      // Clean up temp file
-      try {
-        fs.unlinkSync(tmpPath)
-      } catch {}
+      try { fs.unlinkSync(tmpPath) } catch {}
     }
   }
 
@@ -144,30 +140,50 @@ export class AudioHelper {
     const response = await axios.default.post(
       `${baseUrl}/models/${modelName}:generateContent?key=${apiKey}`,
       body,
-      { timeout: 30000 }
+      { timeout: 15000 }
     )
 
     const candidates = response.data?.candidates || []
-    if (!candidates.length) {
-      return ""
-    }
+    if (!candidates.length) return ""
 
     const parts = candidates[0]?.content?.parts || []
-    const texts: string[] = []
-    for (const part of parts) {
-      if (typeof part?.text === "string" && part.text.trim()) {
-        texts.push(part.text.trim())
-      }
-    }
-
-    return texts.join("\n").trim()
+    return parts
+      .filter((p: any) => typeof p?.text === "string" && p.text.trim())
+      .map((p: any) => p.text.trim())
+      .join("\n")
+      .trim()
   }
 
   /**
-   * Process a transcription chunk: transcribe audio, accumulate text,
-   * and send updates to the renderer.
+   * Process an audio chunk concurrently.
+   * Does NOT block — fires the transcription request and resolves
+   * immediately so the caller can keep sending new chunks.
    */
   public async processAudioChunk(audioData: Buffer): Promise<void> {
+    // Don't queue too many concurrent requests
+    if (this.activeTranscriptions >= this.MAX_CONCURRENT) {
+      console.log(
+        `Skipping chunk — ${this.activeTranscriptions} transcriptions already in-flight`
+      )
+      return
+    }
+
+    const chunkId = ++this.chunkCounter
+    this.activeTranscriptions++
+
+    // Fire-and-forget — don't await so the renderer can keep sending
+    this.transcribeChunk(audioData, chunkId).finally(() => {
+      this.activeTranscriptions--
+    })
+  }
+
+  /**
+   * Internal: transcribe a single chunk and emit the result to the renderer.
+   */
+  private async transcribeChunk(
+    audioData: Buffer,
+    chunkId: number
+  ): Promise<void> {
     const win = this.mainWindow()
     if (!win || win.isDestroyed()) return
 
@@ -175,26 +191,30 @@ export class AudioHelper {
       const text = await this.transcribeAudio(audioData)
 
       if (!text || text === "[无语音]" || text.length < 2) {
-        return // Skip empty or silence
+        return // silence
       }
 
       const result: AudioTranscriptionResult = {
         text,
         timestamp: Date.now(),
+        chunkId,
       }
       this.transcriptionHistory.push(result)
 
-      // Keep only last 50 transcriptions
-      if (this.transcriptionHistory.length > 50) {
-        this.transcriptionHistory = this.transcriptionHistory.slice(-50)
+      // Keep last 100 entries
+      if (this.transcriptionHistory.length > 100) {
+        this.transcriptionHistory = this.transcriptionHistory.slice(-100)
       }
 
       win.webContents.send(AUDIO_EVENTS.TRANSCRIPTION_UPDATE, result)
     } catch (error: any) {
-      console.error("Audio transcription error:", error)
-      win.webContents.send(AUDIO_EVENTS.AUDIO_ERROR, {
-        message: error.message || "转录失败",
-      })
+      console.error(`Transcription error (chunk ${chunkId}):`, error.message)
+      // Only surface the error for the first few failures, not every chunk
+      if (this.activeTranscriptions <= 1) {
+        win.webContents.send(AUDIO_EVENTS.AUDIO_ERROR, {
+          message: error.message || "转录失败",
+        })
+      }
     }
   }
 
@@ -220,9 +240,8 @@ export class AudioHelper {
         message: "正在分析问题并生成答案...",
       })
 
-      // Build the question from transcription history
       const recentTranscriptions = this.transcriptionHistory
-        .slice(-20)
+        .slice(-30)
         .map((t) => t.text)
         .join("\n")
 
@@ -235,9 +254,7 @@ export class AudioHelper {
         return
       }
 
-      // Load knowledge base context
       const kbContext = this.knowledgeBase.getContextForPrompt()
-
       const config = configHelper.loadConfig()
       const language = config.language || "python"
 
@@ -374,9 +391,6 @@ ${question}
     }
   }
 
-  /**
-   * Cancel ongoing answer generation
-   */
   public cancelGeneration(): void {
     if (this.currentAbortController) {
       this.currentAbortController.abort()
@@ -385,16 +399,11 @@ ${question}
     this.isProcessing = false
   }
 
-  /**
-   * Clear transcription history
-   */
   public clearHistory(): void {
     this.transcriptionHistory = []
+    this.chunkCounter = 0
   }
 
-  /**
-   * Get accumulated transcription text
-   */
   public getTranscriptionText(): string {
     return this.transcriptionHistory.map((t) => t.text).join("\n")
   }

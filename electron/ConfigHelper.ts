@@ -80,7 +80,7 @@ export class ConfigHelper extends EventEmitter {
     language: "python",
     opacity: 1.0,
     knowledgeBasePath: "",
-    audioChunkInterval: 10
+    audioChunkInterval: 3
   };
 
   constructor() {
