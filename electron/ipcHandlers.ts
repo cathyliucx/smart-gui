@@ -417,6 +417,25 @@ export function initializeIpcHandlers(deps: IIpcHandlerDeps): void {
     }
   })
 
+  // Multimodal processing: audio + screenshots in single model call
+  ipcMain.handle("process-multimodal", async (_event, options: {
+    screenshotPaths?: string[],
+    customQuestion?: string
+  }) => {
+    if (!audioHelper) {
+      return { success: false, error: "Audio helper not initialized" }
+    }
+    try {
+      await audioHelper.processMultimodal(
+        options.screenshotPaths,
+        options.customQuestion
+      )
+      return { success: true }
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
+
   // Cancel ongoing answer generation
   ipcMain.handle("cancel-audio-generation", () => {
     audioHelper?.cancelGeneration()

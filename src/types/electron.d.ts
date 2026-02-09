@@ -93,6 +93,7 @@ export interface ElectronAPI {
   getDesktopSources: () => Promise<Array<{ id: string; name: string }>>
   sendAudioChunk: (audioData: ArrayBuffer) => Promise<{ success: boolean; error?: string }>
   generateAudioAnswer: (customQuestion?: string) => Promise<{ success: boolean; error?: string }>
+  processMultimodal: (options: { screenshotPaths?: string[]; customQuestion?: string }) => Promise<{ success: boolean; error?: string }>
   cancelAudioGeneration: () => Promise<{ success: boolean }>
   clearAudioHistory: () => Promise<{ success: boolean }>
   getAudioTranscriptionText: () => Promise<string>

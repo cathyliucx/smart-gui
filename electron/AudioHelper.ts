@@ -1,6 +1,7 @@
 // AudioHelper.ts
-// Handles audio transcription via AI providers and answer generation.
-// Supports concurrent chunk processing for real-time transcription.
+// Handles multimodal understanding via AI providers.
+// Supports: audio only, screenshot only, audio + screenshot combined.
+// Uses native multimodal capabilities of models (Gemini audio+vision, OpenAI GPT-4o vision, Claude vision).
 import fs from "node:fs"
 import path from "node:path"
 import { app, BrowserWindow } from "electron"
@@ -41,6 +42,9 @@ export class AudioHelper {
   private activeTranscriptions = 0
   private readonly MAX_CONCURRENT = 3 // max parallel transcription requests
 
+  // Accumulated audio chunks for multimodal processing
+  private audioChunks: Buffer[] = []
+
   constructor(
     getMainWindow: () => BrowserWindow | null,
     knowledgeBase: KnowledgeBaseHelper
@@ -51,6 +55,7 @@ export class AudioHelper {
 
   /**
    * Transcribe an audio buffer using the configured AI provider.
+   * Used for real-time transcription display.
    */
   public async transcribeAudio(audioBuffer: Buffer): Promise<string> {
     const config = configHelper.loadConfig()
@@ -78,7 +83,7 @@ export class AudioHelper {
     const client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.openaiBaseUrl,
-      timeout: 15000, // tighter timeout for real-time
+      timeout: 15000,
     })
 
     const tmpPath = path.join(
@@ -158,8 +163,16 @@ export class AudioHelper {
    * Process an audio chunk concurrently.
    * Does NOT block — fires the transcription request and resolves
    * immediately so the caller can keep sending new chunks.
+   * Also accumulates audio chunks for later multimodal processing.
    */
   public async processAudioChunk(audioData: Buffer): Promise<void> {
+    // Accumulate for multimodal processing
+    this.audioChunks.push(audioData)
+    // Keep last 20 chunks (~60s at 3s/chunk)
+    if (this.audioChunks.length > 20) {
+      this.audioChunks = this.audioChunks.slice(-20)
+    }
+
     // Don't queue too many concurrent requests
     if (this.activeTranscriptions >= this.MAX_CONCURRENT) {
       console.log(
@@ -209,7 +222,6 @@ export class AudioHelper {
       win.webContents.send(AUDIO_EVENTS.TRANSCRIPTION_UPDATE, result)
     } catch (error: any) {
       console.error(`Transcription error (chunk ${chunkId}):`, error.message)
-      // Only surface the error for the first few failures, not every chunk
       if (this.activeTranscriptions <= 1) {
         win.webContents.send(AUDIO_EVENTS.AUDIO_ERROR, {
           message: error.message || "转录失败",
@@ -219,15 +231,29 @@ export class AudioHelper {
   }
 
   /**
-   * Generate an AI answer based on accumulated transcriptions + knowledge base.
+   * Multimodal understanding: send audio and/or screenshots directly to the model.
+   * This is the core method — replaces the old two-step transcribe→answer flow.
+   *
+   * Supported modes:
+   * - Audio only: sends recent audio chunks directly to the model
+   * - Screenshot only: sends screenshot images to the model
+   * - Audio + Screenshot: sends both for combined understanding
+   *
+   * Provider capabilities:
+   * - Gemini: native audio + vision (best for multimodal)
+   * - OpenAI: vision + whisper transcription (audio sent as text)
+   * - Anthropic: vision only (audio sent as text via whisper/gemini)
    */
-  public async generateAnswer(customQuestion?: string): Promise<void> {
+  public async processMultimodal(
+    screenshotPaths?: string[],
+    customQuestion?: string
+  ): Promise<void> {
     const win = this.mainWindow()
     if (!win || win.isDestroyed()) return
 
     if (this.isProcessing) {
       win.webContents.send(AUDIO_EVENTS.AUDIO_STATUS, {
-        message: "正在生成答案，请稍候...",
+        message: "正在处理中，请稍候...",
       })
       return
     }
@@ -236,132 +262,87 @@ export class AudioHelper {
     this.currentAbortController = new AbortController()
 
     try {
-      win.webContents.send(AUDIO_EVENTS.AUDIO_STATUS, {
-        message: "正在分析问题并生成答案...",
-      })
+      const config = configHelper.loadConfig()
+      const language = config.language || "python"
+      const kbContext = this.knowledgeBase.getContextForPrompt()
 
-      const recentTranscriptions = this.transcriptionHistory
-        .slice(-30)
-        .map((t) => t.text)
-        .join("\n")
+      const hasAudio = this.audioChunks.length > 0
+      const hasScreenshots = screenshotPaths && screenshotPaths.length > 0
+      const hasTranscription = this.transcriptionHistory.length > 0
 
-      const question = customQuestion || recentTranscriptions
-
-      if (!question.trim()) {
+      if (!hasAudio && !hasScreenshots && !hasTranscription && !customQuestion) {
         win.webContents.send(AUDIO_EVENTS.AUDIO_ERROR, {
-          message: "没有检测到语音内容，无法生成答案",
+          message: "没有音频或截图输入，无法生成答案",
         })
         return
       }
 
-      const kbContext = this.knowledgeBase.getContextForPrompt()
-      const config = configHelper.loadConfig()
-      const language = config.language || "python"
+      // Build status message
+      const inputTypes: string[] = []
+      if (hasAudio) inputTypes.push("音频")
+      if (hasScreenshots) inputTypes.push(`截图(${screenshotPaths!.length}张)`)
+      if (customQuestion) inputTypes.push("自定义问题")
+      win.webContents.send(AUDIO_EVENTS.AUDIO_STATUS, {
+        message: `正在用多模态模型理解 ${inputTypes.join(" + ")}...`,
+      })
 
-      const systemPrompt = `你是一个面试助手。根据听到的面试问题，给出准确、简洁的回答。
+      // Load screenshot data
+      const screenshotDataList: Array<{ base64: string; mimeType: string }> = []
+      if (hasScreenshots) {
+        for (const p of screenshotPaths!) {
+          if (fs.existsSync(p)) {
+            const data = fs.readFileSync(p)
+            screenshotDataList.push({
+              base64: data.toString("base64"),
+              mimeType: "image/png",
+            })
+          }
+        }
+      }
+
+      // Merge recent audio into one buffer for multimodal providers
+      let mergedAudioBase64: string | null = null
+      if (hasAudio) {
+        const recentChunks = this.audioChunks.slice(-10) // last ~30s
+        const merged = Buffer.concat(recentChunks)
+        mergedAudioBase64 = merged.toString("base64")
+      }
+
+      // Get transcription text as fallback for providers that don't support audio
+      const transcriptionText = this.transcriptionHistory
+        .slice(-30)
+        .map((t) => t.text)
+        .join("\n")
+
+      const systemPrompt = `你是一个面试助手。你会接收到面试过程中的音频、截图或两者的组合。
+请理解所有输入内容，并给出准确、简洁的回答。
 
 规则：
 1. 如果是技术面试题（算法/数据结构/系统设计等），给出专业的技术回答
 2. 如果涉及代码，使用 ${language} 语言，并用 Markdown 代码块包裹
 3. 如果是行为面试题，给出结构化的回答（STAR 方法）
-4. 回答要简洁但完整，重点突出
-5. 如果提供了知识库内容，优先参考知识库中的信息来作答`
-
-      const userMessage = kbContext
-        ? `以下是我的个人知识库/笔记内容，请参考：
----
-${kbContext}
----
-
-面试官的问题/对话内容：
-${question}
-
-请根据以上内容给出回答。`
-        : `面试官的问题/对话内容：
-${question}
-
-请给出回答。`
+4. 如果是选择题，直接给出选项字母和简短解释
+5. 回答要简洁但完整，重点突出
+6. 如果同时有音频和截图，综合两者的信息来理解题意
+7. 如果提供了知识库内容，优先参考知识库中的信息来作答`
 
       let answerText = ""
 
-      if (config.apiProvider === "openai") {
-        const client = new OpenAI({
-          apiKey: config.apiKey,
-          baseURL: config.openaiBaseUrl,
-          timeout: 60000,
-          maxRetries: 2,
-        })
-
-        const response = await client.chat.completions.create({
-          model: config.openaiModel,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userMessage },
-          ],
-          max_tokens: 4000,
-          temperature: 0.3,
-        })
-
-        answerText = response.choices[0]?.message?.content || ""
-      } else if (config.apiProvider === "gemini") {
-        const rawBase =
-          config.geminiBaseUrl || "https://generativelanguage.googleapis.com"
-        const baseUrl = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase
-        const modelName = config.geminiModel
-
-        const body = {
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: `${systemPrompt}\n\n${userMessage}` }],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 8192,
-          },
-        }
-
-        const response = await axios.default.post(
-          `${baseUrl}/models/${modelName}:generateContent?key=${config.apiKey}`,
-          body,
-          { signal: this.currentAbortController?.signal }
+      if (config.apiProvider === "gemini") {
+        answerText = await this.processMultimodalGemini(
+          config, systemPrompt, kbContext, customQuestion,
+          mergedAudioBase64, screenshotDataList, transcriptionText
         )
-
-        const candidates = response.data?.candidates || []
-        if (candidates.length) {
-          const parts = candidates[0]?.content?.parts || []
-          answerText = parts
-            .map((p: any) => p?.text || "")
-            .join("\n")
-            .trim()
-        }
+      } else if (config.apiProvider === "openai") {
+        answerText = await this.processMultimodalOpenAI(
+          config, systemPrompt, kbContext, customQuestion,
+          mergedAudioBase64, screenshotDataList, transcriptionText
+        )
       } else if (config.apiProvider === "anthropic") {
-        const client = new Anthropic({
-          apiKey: config.apiKey,
-          baseURL: config.anthropicBaseUrl,
-          timeout: 60000,
-          maxRetries: 2,
-        })
-
-        const response = await client.messages.create({
-          model: config.anthropicModel,
-          max_tokens: 4000,
-          temperature: 0.3,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userMessage }],
-        })
-
-        const textParts: string[] = []
-        for (const part of response.content as Array<{
-          type: string
-          text?: string
-        }>) {
-          if (part.type === "text" && typeof part.text === "string") {
-            textParts.push(part.text.trim())
-          }
-        }
-        answerText = textParts.join("\n").trim()
+        answerText = await this.processMultimodalAnthropic(
+          config, systemPrompt, kbContext, customQuestion,
+          screenshotDataList, transcriptionText
+        )
       }
 
       if (!answerText) {
@@ -369,7 +350,7 @@ ${question}
       }
 
       const answerResult: AudioAnswerResult = {
-        question,
+        question: customQuestion || transcriptionText || "[多模态输入]",
         answer: answerText,
         timestamp: Date.now(),
       }
@@ -379,16 +360,243 @@ ${question}
         message: "答案生成完成",
       })
     } catch (error: any) {
-      console.error("Answer generation error:", error)
+      console.error("Multimodal processing error:", error)
       if (!axios.isCancel(error)) {
         win.webContents.send(AUDIO_EVENTS.AUDIO_ERROR, {
-          message: error.message || "答案生成失败",
+          message: error.message || "多模态处理失败",
         })
       }
     } finally {
       this.isProcessing = false
       this.currentAbortController = null
     }
+  }
+
+  /**
+   * Gemini: native multimodal — audio + images in a single request.
+   */
+  private async processMultimodalGemini(
+    config: any,
+    systemPrompt: string,
+    kbContext: string,
+    customQuestion: string | undefined,
+    audioBase64: string | null,
+    screenshots: Array<{ base64: string; mimeType: string }>,
+    transcriptionText: string
+  ): Promise<string> {
+    const rawBase = config.geminiBaseUrl || "https://generativelanguage.googleapis.com"
+    const baseUrl = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase
+    const modelName = config.geminiModel || "gemini-2.0-flash"
+
+    const parts: any[] = []
+
+    // Add audio data natively
+    if (audioBase64) {
+      parts.push({
+        inlineData: {
+          mimeType: "audio/webm",
+          data: audioBase64,
+        },
+      })
+    }
+
+    // Add screenshots natively
+    for (const s of screenshots) {
+      parts.push({
+        inlineData: {
+          mimeType: s.mimeType,
+          data: s.base64,
+        },
+      })
+    }
+
+    // Build text prompt
+    let textPrompt = systemPrompt + "\n\n"
+    if (kbContext) {
+      textPrompt += `以下是知识库内容，请参考：\n---\n${kbContext}\n---\n\n`
+    }
+    if (customQuestion) {
+      textPrompt += `用户问题：${customQuestion}\n\n`
+    }
+    if (audioBase64) {
+      textPrompt += "请理解上面的音频内容。"
+    }
+    if (screenshots.length > 0) {
+      textPrompt += "请理解上面的截图内容。"
+    }
+    if (audioBase64 && screenshots.length > 0) {
+      textPrompt = textPrompt.replace(
+        "请理解上面的音频内容。请理解上面的截图内容。",
+        "请综合理解上面的音频和截图内容。"
+      )
+    }
+    textPrompt += "\n请给出回答。"
+
+    parts.push({ text: textPrompt })
+
+    const body = {
+      contents: [{ role: "user", parts }],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 8192,
+      },
+    }
+
+    const response = await axios.default.post(
+      `${baseUrl}/models/${modelName}:generateContent?key=${config.apiKey}`,
+      body,
+      { signal: this.currentAbortController?.signal, timeout: 60000 }
+    )
+
+    const candidates = response.data?.candidates || []
+    if (!candidates.length) return ""
+
+    const respParts = candidates[0]?.content?.parts || []
+    return respParts
+      .map((p: any) => p?.text || "")
+      .join("\n")
+      .trim()
+  }
+
+  /**
+   * OpenAI: vision + text. Audio is transcribed first then sent as text.
+   * GPT-4o supports images natively but not raw audio.
+   */
+  private async processMultimodalOpenAI(
+    config: any,
+    systemPrompt: string,
+    kbContext: string,
+    customQuestion: string | undefined,
+    audioBase64: string | null,
+    screenshots: Array<{ base64: string; mimeType: string }>,
+    transcriptionText: string
+  ): Promise<string> {
+    const client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.openaiBaseUrl,
+      timeout: 60000,
+      maxRetries: 2,
+    })
+
+    // For OpenAI, transcribe audio to text first if we have new audio
+    let audioText = transcriptionText
+    if (audioBase64 && !audioText) {
+      const audioBuffer = Buffer.from(audioBase64, "base64")
+      audioText = await this.transcribeWithWhisper(audioBuffer, config)
+    }
+
+    // Build user content with images
+    const contentParts: any[] = []
+
+    let userText = ""
+    if (kbContext) {
+      userText += `知识库内容：\n---\n${kbContext}\n---\n\n`
+    }
+    if (audioText) {
+      userText += `面试中听到的内容：\n${audioText}\n\n`
+    }
+    if (customQuestion) {
+      userText += `用户问题：${customQuestion}\n\n`
+    }
+    if (screenshots.length > 0) {
+      userText += "请同时参考以下截图内容。\n"
+    }
+    userText += "请给出回答。"
+
+    contentParts.push({ type: "text", text: userText })
+
+    for (const s of screenshots) {
+      contentParts.push({
+        type: "image_url",
+        image_url: { url: `data:${s.mimeType};base64,${s.base64}` },
+      })
+    }
+
+    const response = await client.chat.completions.create({
+      model: config.openaiModel,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: contentParts },
+      ],
+      max_tokens: 4000,
+      temperature: 0.3,
+    })
+
+    return response.choices[0]?.message?.content || ""
+  }
+
+  /**
+   * Anthropic: vision + text. Audio is transcribed first then sent as text.
+   * Claude supports images natively but not raw audio.
+   */
+  private async processMultimodalAnthropic(
+    config: any,
+    systemPrompt: string,
+    kbContext: string,
+    customQuestion: string | undefined,
+    screenshots: Array<{ base64: string; mimeType: string }>,
+    transcriptionText: string
+  ): Promise<string> {
+    const client = new Anthropic({
+      apiKey: config.apiKey,
+      baseURL: config.anthropicBaseUrl,
+      timeout: 60000,
+      maxRetries: 2,
+    })
+
+    const contentParts: any[] = []
+
+    let userText = ""
+    if (kbContext) {
+      userText += `知识库内容：\n---\n${kbContext}\n---\n\n`
+    }
+    if (transcriptionText) {
+      userText += `面试中听到的内容：\n${transcriptionText}\n\n`
+    }
+    if (customQuestion) {
+      userText += `用户问题：${customQuestion}\n\n`
+    }
+    if (screenshots.length > 0) {
+      userText += "请同时参考以下截图内容。\n"
+    }
+    userText += "请给出回答。"
+
+    contentParts.push({ type: "text", text: userText })
+
+    for (const s of screenshots) {
+      contentParts.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: s.mimeType,
+          data: s.base64,
+        },
+      })
+    }
+
+    const response = await client.messages.create({
+      model: config.anthropicModel,
+      max_tokens: 4000,
+      temperature: 0.3,
+      system: systemPrompt,
+      messages: [{ role: "user", content: contentParts }],
+    })
+
+    const textParts: string[] = []
+    for (const part of response.content as Array<{ type: string; text?: string }>) {
+      if (part.type === "text" && typeof part.text === "string") {
+        textParts.push(part.text.trim())
+      }
+    }
+    return textParts.join("\n").trim()
+  }
+
+  /**
+   * Legacy: Generate an AI answer based on accumulated transcriptions + knowledge base.
+   * Kept for backward compatibility. Internally delegates to processMultimodal.
+   */
+  public async generateAnswer(customQuestion?: string): Promise<void> {
+    return this.processMultimodal(undefined, customQuestion)
   }
 
   public cancelGeneration(): void {
@@ -401,6 +609,7 @@ ${question}
 
   public clearHistory(): void {
     this.transcriptionHistory = []
+    this.audioChunks = []
     this.chunkCounter = 0
   }
 

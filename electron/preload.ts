@@ -256,6 +256,8 @@ const electronAPI = {
     ipcRenderer.invoke("send-audio-chunk", Buffer.from(audioData)),
   generateAudioAnswer: (customQuestion?: string) =>
     ipcRenderer.invoke("generate-audio-answer", customQuestion),
+  processMultimodal: (options: { screenshotPaths?: string[]; customQuestion?: string }) =>
+    ipcRenderer.invoke("process-multimodal", options),
   cancelAudioGeneration: () => ipcRenderer.invoke("cancel-audio-generation"),
   clearAudioHistory: () => ipcRenderer.invoke("clear-audio-history"),
   getAudioTranscriptionText: () => ipcRenderer.invoke("get-audio-transcription-text"),
