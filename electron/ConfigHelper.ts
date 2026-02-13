@@ -19,6 +19,7 @@ interface Config {
   // Audio monitoring settings
   knowledgeBasePath: string;
   audioChunkInterval: number; // seconds between audio chunks for transcription
+  silentMode: boolean; // true = text only, false = TTS speech output
   // Legacy fields retained for backward compatibility with existing config files
   extractionModel?: string;
   solutionModel?: string;
@@ -80,7 +81,8 @@ export class ConfigHelper extends EventEmitter {
     language: "python",
     opacity: 1.0,
     knowledgeBasePath: "",
-    audioChunkInterval: 3
+    audioChunkInterval: 3,
+    silentMode: true
   };
 
   constructor() {

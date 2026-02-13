@@ -205,7 +205,7 @@ const electronAPI = {
   
   // New methods for OpenAI API integration
   getConfig: () => ipcRenderer.invoke("get-config"),
-  updateConfig: (config: { 
+  updateConfig: (config: {
     apiKey?: string;
     apiProvider?: "openai" | "gemini" | "anthropic";
     openaiModel?: string;
@@ -216,7 +216,8 @@ const electronAPI = {
     anthropicBaseUrl?: string;
     language?: string;
     opacity?: number;
-  }) => 
+    silentMode?: boolean;
+  }) =>
     ipcRenderer.invoke("update-config", config),
   setClickThrough: (ignore: boolean) => ipcRenderer.invoke("set-click-through", ignore),
   onShowSettings: (callback: () => void) => {

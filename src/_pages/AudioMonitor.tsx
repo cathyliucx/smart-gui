@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback, type FC } from "react"
-import { Mic, MicOff, Send, Trash2, FolderOpen, RefreshCw, Camera, X, Image } from "lucide-react"
+import { Mic, MicOff, Send, Trash2, FolderOpen, RefreshCw, Camera, X, Image, Volume2, VolumeX } from "lucide-react"
+import { speak, stop as stopTTS } from "../utils/tts"
 
 interface AudioMonitorProps {
   setView: (view: "queue" | "solutions" | "debug" | "audio") => void
@@ -42,6 +43,8 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
   const [pendingChunks, setPendingChunks] = useState(0)
   const [inputMode, setInputMode] = useState<InputMode>("audio")
   const [screenshots, setScreenshots] = useState<CapturedScreenshot[]>([])
+  const [silentMode, setSilentMode] = useState(true)
+  const silentModeRef = useRef(true)
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -49,19 +52,28 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
   const answerEndRef = useRef<HTMLDivElement>(null)
   const pendingRef = useRef(0)
 
-  // Load KB info on mount
+  // Load KB info and silentMode on mount
   useEffect(() => {
-    const loadKBInfo = async () => {
+    const loadInitData = async () => {
       try {
         const kbPathResult = await window.electronAPI.getKnowledgeBasePath()
         setKbPath(kbPathResult || "")
         const docs = await window.electronAPI.getKnowledgeBaseDocuments()
         setKbDocCount(docs.length)
+        const config = await window.electronAPI.getConfig()
+        const isSilent = config.silentMode !== false // default true
+        setSilentMode(isSilent)
+        silentModeRef.current = isSilent
       } catch (err) {
-        console.error("Error loading KB info:", err)
+        console.error("Error loading init data:", err)
       }
     }
-    loadKBInfo()
+    loadInitData()
+  }, [])
+
+  // Stop TTS on unmount
+  useEffect(() => {
+    return () => { stopTTS() }
   }, [])
 
   // Subscribe to audio events from main process
@@ -76,6 +88,10 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
       window.electronAPI.onAudioAnswerUpdate((data) => {
         setAnswers((prev) => [...prev, data])
         setIsGenerating(false)
+        // Non-silent: speak the full answer via TTS
+        if (!silentModeRef.current && data.answer) {
+          speak(data.answer)
+        }
       }),
       window.electronAPI.onAudioError((data) => {
         setErrorMessage(data.message)
@@ -251,7 +267,19 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
     }
   }, [screenshots, inputMode])
 
+  const handleToggleSilent = useCallback(async () => {
+    const newValue = !silentMode
+    setSilentMode(newValue)
+    silentModeRef.current = newValue
+    // Stop any ongoing TTS when switching to silent
+    if (newValue) {
+      stopTTS()
+    }
+    await window.electronAPI.updateConfig({ silentMode: newValue })
+  }, [silentMode])
+
   const handleClear = useCallback(async () => {
+    stopTTS()
     setTranscriptions([])
     setAnswers([])
     setScreenshots([])
@@ -330,7 +358,7 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
         </div>
       </div>
 
-      {/* Input Mode Selector */}
+      {/* Input Mode Selector + Silent Toggle */}
       <div className="flex items-center gap-1 mb-3">
         <span className="text-[10px] text-white/40 mr-1">输入模式:</span>
         {(["audio", "screenshot", "audio+screenshot"] as InputMode[]).map((mode) => (
@@ -346,6 +374,23 @@ const AudioMonitor: FC<AudioMonitorProps> = ({
             {mode === "audio" ? "仅音频" : mode === "screenshot" ? "仅截图" : "音频+截图"}
           </button>
         ))}
+        <div className="ml-auto flex items-center">
+          <button
+            onClick={handleToggleSilent}
+            className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-all ${
+              silentMode
+                ? "bg-white/5 text-white/50 hover:bg-white/10 hover:text-white/70"
+                : "bg-orange-500/80 text-white"
+            }`}
+            title={silentMode ? "当前：静默模式（纯文本）" : "当前：语音播报模式"}
+          >
+            {silentMode ? (
+              <><VolumeX className="w-3 h-3" />静默</>
+            ) : (
+              <><Volume2 className="w-3 h-3" />语音</>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Control Bar */}

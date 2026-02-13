@@ -67,6 +67,7 @@ export interface ElectronAPI {
     opacity: number;
     knowledgeBasePath: string;
     audioChunkInterval: number;
+    silentMode: boolean;
   }>
   updateConfig: (config: {
     apiKey?: string;
@@ -81,6 +82,7 @@ export interface ElectronAPI {
     opacity?: number;
     knowledgeBasePath?: string;
     audioChunkInterval?: number;
+    silentMode?: boolean;
   }) => Promise<boolean>
   setClickThrough: (ignore: boolean) => Promise<{ success: boolean; error?: string }>
   checkApiKey: () => Promise<boolean>
