@@ -18,6 +18,10 @@
   - Gemini：原生支持音频+图片，一次 API 调用直接理解（推荐）
   - OpenAI (GPT-4o)：图片原生支持，音频通过 Whisper 转录后组合
   - Anthropic (Claude)：图片原生支持，音频通过转录文本发送
+- **静默/语音两种输出模式**：
+  - **静默模式（默认）**：答案仅文本显示，不发出声音
+  - **语音模式**：答案生成后自动 TTS 语音播报完整内容，不截断；自动跳过代码块不朗读
+  - 可通过界面上的静默/语音按钮一键切换，设置自动保存
 - **知识库辅助**：可加载本地文件夹作为个人知识库，模型回答时优先参考
 
 ### 通用
@@ -116,7 +120,8 @@ npm run package       # 当前平台默认格式
   "openaiModel": "gpt-4o",
   "geminiModel": "gemini-2.5-flash",
   "anthropicModel": "claude-sonnet-4-5",
-  "language": "python"
+  "language": "python",
+  "silentMode": true
 }
 ```
 
