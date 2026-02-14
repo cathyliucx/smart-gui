@@ -217,6 +217,8 @@ const electronAPI = {
     language?: string;
     opacity?: number;
     silentMode?: boolean;
+    knowledgeBasePath?: string;
+    audioChunkInterval?: number;
   }) =>
     ipcRenderer.invoke("update-config", config),
   setClickThrough: (ignore: boolean) => ipcRenderer.invoke("set-click-through", ignore),

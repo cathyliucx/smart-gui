@@ -60,8 +60,7 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
   // Handle open state changes
   const handleOpenChange = (newOpen: boolean) => {
     setOpen(newOpen);
-    // Only call onOpenChange when there's actually a change
-    if (onOpenChange && newOpen !== externalOpen) {
+    if (onOpenChange) {
       onOpenChange(newOpen);
     }
   };
@@ -139,7 +138,7 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
   const handleSave = async () => {
     setIsLoading(true);
     try {
-      const result = await window.electronAPI.updateConfig({
+      await window.electronAPI.updateConfig({
         apiKey,
         apiProvider,
         openaiModel,
@@ -150,16 +149,19 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
         anthropicBaseUrl,
         audioChunkInterval,
       });
-      
-      if (result) {
-        showToast("Success", "Settings saved successfully", "success");
-        handleOpenChange(false);
-        
-        // Force reload the app to apply the API key
-        setTimeout(() => {
-          window.location.reload();
-        }, 1500);
+
+      showToast("Success", "Settings saved successfully", "success");
+
+      // Close dialog
+      setOpen(false);
+      if (onOpenChange) {
+        onOpenChange(false);
       }
+
+      // Reload to apply changes
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
     } catch (error) {
       console.error("Failed to save settings:", error);
       showToast("Error", "Failed to save settings", "error");
