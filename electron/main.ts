@@ -12,6 +12,23 @@ import * as dotenv from "dotenv"
 // Constants
 const isDev = process.env.NODE_ENV === "development"
 
+// Prevent EIO crashes from console.log when stdout pipe is broken (common in packaged Electron apps)
+const origLog = console.log
+const origError = console.error
+const origWarn = console.warn
+console.log = (...args: any[]) => { try { origLog(...args) } catch {} }
+console.error = (...args: any[]) => { try { origError(...args) } catch {} }
+console.warn = (...args: any[]) => { try { origWarn(...args) } catch {} }
+
+// Catch uncaught EIO errors from broken stdout/stderr pipes
+process.on('uncaughtException', (err) => {
+  if (err?.message?.includes('EIO')) return // Silently ignore EIO
+  try { origError('Uncaught Exception:', err) } catch {}
+})
+process.on('unhandledRejection', (reason) => {
+  try { origError('Unhandled Rejection:', reason) } catch {}
+})
+
 // Application State
 const state = {
   // Window management properties
