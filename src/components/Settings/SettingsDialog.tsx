@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Button } from "../ui/button";
@@ -69,20 +68,18 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
   useEffect(() => {
     if (open) {
       setIsLoading(true);
-      interface Config {
-        apiKey?: string;
-        apiProvider?: APIProvider;
-        openaiModel?: string;
-        geminiModel?: string;
-        anthropicModel?: string;
-        openaiBaseUrl?: string;
-        geminiBaseUrl?: string;
-        anthropicBaseUrl?: string;
-      }
+      console.log("[Settings] Loading config...");
+
+      // Safety timeout: ensure isLoading is cleared even if IPC hangs
+      const safetyTimer = setTimeout(() => {
+        console.warn("[Settings] Config load safety timeout reached");
+        setIsLoading(false);
+      }, 5000);
 
       window.electronAPI
         .getConfig()
-        .then((config: Config) => {
+        .then((config: any) => {
+          console.log("[Settings] Config loaded:", config?.apiProvider, "key length:", config?.apiKey?.length || 0);
           const resolvedProvider = config.apiProvider || "openai";
 
           setApiKey(config.apiKey || "");
@@ -93,17 +90,19 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
           setOpenaiBaseUrl(config.openaiBaseUrl || DEFAULT_BASE_URLS.openai);
           setGeminiBaseUrl(config.geminiBaseUrl || DEFAULT_BASE_URLS.gemini);
           setAnthropicBaseUrl(config.anthropicBaseUrl || DEFAULT_BASE_URLS.anthropic);
-          setAudioChunkInterval((config as any).audioChunkInterval || 10);
+          setAudioChunkInterval(config.audioChunkInterval || 10);
           // Load KB info
-          window.electronAPI.getKnowledgeBasePath().then((p: string) => setKbPath(p || ""));
-          window.electronAPI.getKnowledgeBaseDocuments().then((docs: any[]) => setKbDocCount(docs.length));
+          window.electronAPI.getKnowledgeBasePath().then((p: string) => setKbPath(p || "")).catch(() => {});
+          window.electronAPI.getKnowledgeBaseDocuments().then((docs: any[]) => setKbDocCount(docs.length)).catch(() => {});
         })
         .catch((error: unknown) => {
-          console.error("Failed to load config:", error);
+          console.error("[Settings] Failed to load config:", error);
           showToast("Error", "Failed to load settings", "error");
         })
         .finally(() => {
+          clearTimeout(safetyTimer);
           setIsLoading(false);
+          console.log("[Settings] Config load complete, isLoading=false");
         });
     }
   }, [open, showToast]);
@@ -136,10 +135,23 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
   };
 
   const handleSave = async () => {
+    console.log("[Settings] handleSave called, isLoading:", isLoading, "apiKey length:", apiKey.length);
+
+    if (isLoading) {
+      console.log("[Settings] Save blocked: already loading");
+      return;
+    }
+
+    if (!apiKey.trim()) {
+      showToast("Error", "Please enter an API key", "error");
+      return;
+    }
+
     setIsLoading(true);
     try {
-      await window.electronAPI.updateConfig({
-        apiKey,
+      console.log("[Settings] Calling updateConfig...");
+      const result = await window.electronAPI.updateConfig({
+        apiKey: apiKey.trim(),
         apiProvider,
         openaiModel,
         geminiModel,
@@ -149,6 +161,7 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
         anthropicBaseUrl,
         audioChunkInterval,
       });
+      console.log("[Settings] updateConfig result:", result);
 
       showToast("Success", "Settings saved successfully", "success");
 
@@ -160,11 +173,12 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
 
       // Reload to apply changes
       setTimeout(() => {
+        console.log("[Settings] Reloading page...");
         window.location.reload();
       }, 1500);
     } catch (error) {
-      console.error("Failed to save settings:", error);
-      showToast("Error", "Failed to save settings", "error");
+      console.error("[Settings] Failed to save settings:", error);
+      showToast("Error", "Failed to save settings: " + String(error), "error");
     } finally {
       setIsLoading(false);
     }
@@ -183,8 +197,9 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent 
+      <DialogContent
         className="sm:max-w-md bg-black border border-white/10 text-white settings-dialog"
+        data-interactive-region
         style={{
           position: 'fixed',
           top: '50%',
@@ -194,15 +209,17 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
           height: 'auto',
           minHeight: '400px',
           maxHeight: '90vh',
-          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
           zIndex: 9999,
           margin: 0,
-          padding: '20px',
+          padding: 0,
           transition: 'opacity 0.25s ease, transform 0.25s ease',
           animation: 'fadeIn 0.25s ease forwards',
           opacity: 0.98
         }}
-      >        
+      >
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px', paddingBottom: '10px' }}>
         <DialogHeader>
           <DialogTitle>API Settings</DialogTitle>
           <DialogDescription className="text-white/70">
@@ -523,22 +540,41 @@ export function SettingsDialog({ open: externalOpen, onOpenChange }: SettingsDia
             ))}
           </div>
         </div>
-        <DialogFooter className="flex justify-between sm:justify-between">
-          <Button
-            variant="outline"
+        </div>
+        <div
+          data-interactive-region
+          style={{
+            flexShrink: 0,
+            borderTop: '1px solid rgba(255,255,255,0.1)',
+            padding: '12px 20px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '8px',
+            background: 'black',
+          }}
+        >
+          <button
+            type="button"
+            data-interactive-region
             onClick={() => handleOpenChange(false)}
-            className="border-white/10 hover:bg-white/5 text-white"
+            className="px-4 py-2 border border-white/10 hover:bg-white/5 text-white rounded-md text-sm font-medium transition-colors"
           >
             Cancel
-          </Button>
-          <Button
-            className="px-4 py-3 bg-white text-black rounded-xl font-medium hover:bg-white/90 transition-colors"
+          </button>
+          <button
+            type="button"
+            data-interactive-region
             onClick={handleSave}
-            disabled={isLoading || !apiKey}
+            className={`px-4 py-3 rounded-xl font-medium transition-colors text-sm ${
+              isLoading
+                ? 'bg-white/60 text-black/60 cursor-wait'
+                : 'bg-white text-black hover:bg-white/90 cursor-pointer'
+            }`}
           >
             {isLoading ? "Saving..." : "Save Settings"}
-          </Button>
-        </DialogFooter>
+          </button>
+        </div>
       </DialogContent>
     </Dialog>
   );
